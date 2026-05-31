@@ -1,0 +1,151 @@
+<!-- Auto-Pause status display (fw4 adapted) -->
+<fieldset class="cbi-section">
+  <legend>自动暂停运行状态</legend>
+  <table class="cbi-section-table" id="ap_status_table">
+    <tr class="cbi-section-table-title">
+      <th class="cbi-section-table-cell">项目</th>
+      <th class="cbi-section-table-cell">状态</th>
+    </tr>
+  </table>
+  <div id="ap_actions" style="margin-top:8px;"></div>
+</fieldset>
+
+<fieldset class="cbi-section" style="margin-top:12px">
+  <legend>一键获取 Token</legend>
+
+  <div style="padding:8px 0">
+    <p style="margin:0 0 6px 0"><b>方法一 (推荐)：</b>将下方按钮拖到浏览器书签栏。然后打开 <a href="https://www.leigod.com" target="_blank">leigod.com</a> 并登录，点击书签即可自动将 Token 发送到路由器。</p>
+
+    <div id="bm_container" style="margin:8px 0;padding:8px 12px;background:#f0f0f0;border-radius:4px;display:inline-block">
+      <span style="font-size:13px;color:#666;margin-right:8px">📌 拖我到书签栏 →</span>
+      <a id="bm_link" href="" onclick="return false" class="cbi-button cbi-button-action" style="text-decoration:none;cursor:grab">🔑 获取雷神Token</a>
+    </div>
+    <small style="color:#888">点击书签后页面会弹出提示 "Token已发送到路由器!"</small>
+
+    <hr style="margin:12px 0">
+
+    <p style="margin:0 0 6px 0"><b>方法二 (手动)：</b>从 <a href="https://www.leigod.com" target="_blank">leigod.com</a> 登录后，F12 → Console 执行以下代码，然后粘贴到这里：</p>
+    <code style="display:block;padding:4px 8px;background:#1e1e1e;color:#0c0;margin:4px 0 8px">JSON.parse(localStorage.getItem('account_token')).account_token</code>
+
+    <div style="display:flex;align-items:center;gap:8px">
+      <input type="text" id="ap_quick_token" placeholder="粘贴 Token 到这里..." style="flex:1;padding:4px 8px">
+      <button class="cbi-button cbi-button-apply" onclick="ap_save_token()" style="white-space:nowrap">保存</button>
+    </div>
+    <div id="ap_save_msg" style="margin-top:4px;font-size:12px;display:none"></div>
+  </div>
+</fieldset>
+
+<script type="text/javascript">//<![CDATA[
+    // Generate bookmarklet with router URL
+    (function() {
+      var saveUrl = '<%=luci.dispatcher.build_url("admin", "services", "acc", "save_token")%>';
+      var absUrl = window.location.origin + saveUrl;
+      var bmJs = "(function(){try{" +
+        "var t=JSON.parse(localStorage.getItem('account_token')).account_token;" +
+        "window.open('" + absUrl + "?token='+encodeURIComponent(t),'_blank','width=450,height=250');" +
+        "}catch(e){alert('请先在 leigod.com 登录!\\n错误:'+e.message);}})();";
+      document.getElementById('bm_link').href = 'javascript:' + encodeURIComponent(bmJs);
+    })();
+
+    function ap_update_table(data) {
+      var table = document.getElementById("ap_status_table");
+      if (!table || !data) return;
+      while (table.rows.length > 1) table.deleteRow(1);
+
+      var items = [
+        ["脚本", data.script_installed ? "&#x2705; 已安装" : "&#x26A0; 未安装"],
+        ["令牌", data.token_configured ? "&#x2705; " + data.token_masked : "&#x26A0; 未配置"],
+        ["定时任务", data.cron_enabled ? "&#x2705; 已启用 (每2分钟)" : "&#x26A0; 已禁用"],
+        ["空闲计数", data.idle_count + " / " + data.idle_checks],
+        ["上次暂停", data.last_pause_text],
+        ["冷却中", data.in_cooldown ? "冷却中" : "就绪"]
+      ];
+
+      for (var i = 0; i < items.length; i++) {
+        var tr = table.insertRow(-1);
+        tr.insertCell(-1).innerHTML = '<strong>' + items[i][0] + '</strong>';
+        tr.insertCell(-1).innerHTML = items[i][1];
+      }
+
+      var cron_btn = document.getElementById("cbid.accelerator.system._ap_toggle_cron");
+      if (cron_btn) {
+        cron_btn.value = data.cron_enabled ? "禁用自动暂停定时任务" : "启用自动暂停定时任务";
+        cron_btn.className = data.cron_enabled ? "cbi-button cbi-button-reset" : "cbi-button cbi-button-apply";
+      }
+    }
+
+    function ap_save_token() {
+      var token = document.getElementById('ap_quick_token').value.trim();
+      var msg = document.getElementById('ap_save_msg');
+      if (!token || token.length < 10) {
+        msg.style.display = 'block'; msg.style.color = '#c00';
+        msg.textContent = 'Token 无效，请粘贴完整 token'; return;
+      }
+
+      var x = new XMLHttpRequest();
+      x.open('POST', '<%=luci.dispatcher.build_url("admin", "services", "acc", "save_token")%>', true);
+      x.setRequestHeader('Content-Type', 'application/json');
+      x.onload = function() {
+        var r = JSON.parse(x.responseText || '{}');
+        msg.style.display = 'block';
+        if (r.result === 'OK') {
+          msg.style.color = '#080'; msg.textContent = 'Token 已保存!';
+          document.getElementById('ap_quick_token').value = '';
+          ap_poll(); // refresh status
+        } else {
+          msg.style.color = '#c00'; msg.textContent = '保存失败: ' + (r.message || x.status);
+        }
+      };
+      x.onerror = function() {
+        msg.style.display = 'block'; msg.style.color = '#c00';
+        msg.textContent = '网络错误，无法连接路由器';
+      };
+      x.send(JSON.stringify({token: token}));
+    }
+
+    function ap_toggle_cron() {
+      var cron_btn = document.getElementById("cbid.accelerator.system._ap_toggle_cron");
+      var enable = cron_btn && cron_btn.value.indexOf("启用") >= 0 ? 1 : 0;
+      XHR.get('<%=luci.dispatcher.build_url("admin", "services", "acc", "ap_toggle")%>' + '?enable=' + (enable ? '1' : '0'), null, function(x) {
+        setTimeout(function() { ap_poll(); }, 500);
+      });
+    }
+
+    function ap_trigger_pause() {
+      if (!confirm("确认手动暂停? 将调用雷神 API。")) return;
+      XHR.get('<%=luci.dispatcher.build_url("admin", "services", "acc", "ap_trigger")%>', null, function(x) {
+        try {
+          var resp = JSON.parse(x.responseText);
+          alert(resp.message || resp.result);
+        } catch(e) {
+          alert("请求失败: " + (x.statusText || "网络错误"));
+        }
+        setTimeout(function() { ap_poll(); }, 1000);
+      });
+    }
+
+    function ap_poll() {
+      XHR.get('<%=luci.dispatcher.build_url("admin", "services", "acc", "ap_status")%>', null, function(x, st) {
+        try {
+          var data = JSON.parse(x.responseText);
+          ap_update_table(data);
+        } catch(e) { /* silently retry on next poll */ }
+      });
+    }
+
+    document.addEventListener("DOMContentLoaded", function() {
+      var trigger_btn = document.getElementById("cbid.accelerator.system._ap_trigger");
+      if (trigger_btn) {
+        trigger_btn.type = "button";
+        trigger_btn.onclick = function(e) { e.preventDefault(); ap_trigger_pause(); };
+      }
+      var cron_btn = document.getElementById("cbid.accelerator.system._ap_toggle_cron");
+      if (cron_btn) {
+        cron_btn.type = "button";
+        cron_btn.onclick = function(e) { e.preventDefault(); ap_toggle_cron(); };
+      }
+    });
+
+    ap_poll();
+    setInterval(ap_poll, 10000);
+//]]></script>

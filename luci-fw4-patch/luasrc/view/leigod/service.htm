@@ -1,0 +1,29 @@
+<!-- fw4 adapted: acc service state + firewall info -->
+<fieldset class="cbi-section">
+  <legend>加速状态</legend>
+  <table class="cbi-section-table" id="acc_catalog_state_table">
+    <tr class="cbi-section-table-title">
+      <th class="cbi-section-table-cell">设备类型</th>
+      <th class="cbi-section-table-cell">加速状态</th>
+    </tr>
+  </table>
+</fieldset>
+
+<script type="text/javascript">//<![CDATA[
+    XHR.poll(5, '<%=url('admin/services/acc/status')%>', null, function(x, st) {
+      var catalog_table = document.getElementById("acc_catalog_state_table");
+      if (st && catalog_table) {
+        while(catalog_table.rows.length > 1)
+          catalog_table.deleteRow(1);
+        var status_map = st["state"];
+        for (var typ in status_map) {
+          var tr = catalog_table.insertRow(-1);
+          tr.insertCell(-1).innerHTML = typ;
+          tr.insertCell(-1).innerHTML = status_map[typ];
+        }
+        var tr = catalog_table.insertRow(-1);
+        tr.insertCell(-1).innerHTML = '<em>防火墙</em>';
+        tr.insertCell(-1).innerHTML = '<em>' + (st["firewall"] || "unknown") + '</em>';
+      }
+    });
+//]]></script>

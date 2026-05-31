@@ -1,0 +1,184 @@
+<!-- fw4 adapted: Diagnostic debug page -->
+<fieldset class="cbi-section">
+  <legend>诊断报告</legend>
+  <div class="cbi-value" id="debug_status_bar" style="padding:6px 0">
+    <div id="debug_status_text" style="font-weight:bold">加载中...</div>
+  </div>
+  <div id="debug_issues" style="margin-bottom:8px"></div>
+  <div style="width:100%; background:#1e1e1e; border:1px solid #3c3c3c; border-radius:3px; overflow:auto; max-height:70vh">
+    <pre id="debug_output" style="margin:0; padding:12px; font-family:'Courier New',monospace; font-size:13px; line-height:1.35; white-space:pre; color:#ccc; background:transparent; border:none">加载诊断数据...</pre>
+  </div>
+  <div class="cbi-page-actions" style="margin-top:12px">
+    <button class="cbi-button cbi-button-apply" onclick="debug_refresh()">刷新</button>
+    <button class="cbi-button cbi-button-action" onclick="debug_copy()">复制报告</button>
+  </div>
+</fieldset>
+
+<script type="text/javascript">//<![CDATA[
+var DEBUG_POLL_MS = 15000, _debug_data = null;
+
+function debug_refresh() {
+  var x = new XMLHttpRequest();
+  x.onreadystatechange = function() {
+    if (x.readyState !== 4 || x.status !== 200) return;
+    try { _debug_data = JSON.parse(x.responseText); debug_render(_debug_data); }
+    catch(e) { debug_show_err('解析失败: ' + e.message); }
+  };
+  x.open('GET', '<%=luci.dispatcher.build_url("admin", "services", "acc", "debug_status")%>', true);
+  x.send();
+}
+
+function debug_render(data) {
+  if (!data) { debug_show_err('无数据'); return; }
+  var to = function(s) { return (s||'N/A').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+  var yn = function(b) { return b ? 'Yes' : 'No'; };
+  var ok = function(b) { return b ? 'PASS' : 'FAIL'; };
+
+  // Status bar
+  var allClear = data.checks_total > 0 && data.checks_failed === 0 && data.checks_warn === 0;
+  var hasErrors = data.checks_failed > 0, hasWarns = data.checks_warn > 0;
+  var color = allClear ? '#080' : (hasErrors ? '#c00' : '#b85c00');
+  var txt = allClear ? '全部通过 ('+data.checks_passed+'/'+data.checks_total+')'
+    : data.checks_passed+'/'+data.checks_total+' 通过'+(hasErrors?', '+data.checks_failed+' 失败':'')+(hasWarns?', '+data.checks_warn+' 警告':'');
+  document.getElementById('debug_status_text').innerHTML = '<span style="color:'+color+'">'+txt+'</span>';
+
+  // Issues
+  var issDiv = document.getElementById('debug_issues'); issDiv.innerHTML = '';
+  if (data.issues && data.issues.length > 0) {
+    for (var i = 0; i < data.issues.length; i++) {
+      var iss = data.issues[i];
+      var bg = iss.severity==='error'?'#ffe0e0':(iss.severity==='warning'?'#fff8e0':'#e0f0ff');
+      var fg = iss.severity==='error'?'#c00':(iss.severity==='warning'?'#b85c00':'#036');
+      issDiv.innerHTML += '<div style="padding:4px 8px;margin:2px 0;border-radius:2px;background:'+bg+';color:'+fg+';font-weight:bold;font-size:13px">'+(iss.severity==='error'?'✘ ':'⚠ ')+iss.message+'</div>';
+    }
+  }
+
+  // === Build aligned text report ===
+  var L = [];
+  // Chinese-aware visual width for alignment
+  var vl = function(s) { var w=0; for(var i=0;i<s.length;i++) w+=s.charCodeAt(i)>127?2:1; return w; };
+  var pd = function(s,w) { var n=w-vl(s); return n>0?s+' '.repeat(n):s+' '; };
+  var COL = 14; // label column width (Chinese chars)
+  var rw = function(label, value) { L.push('  '+pd(label,COL)+' │ '+value); };
+  var sec = function(title) { L.push(''); L.push('── '+title); };
+
+  var now = new Date();
+  L.push('═══════════════════════════════════════');
+  L.push('  Leigod Accelerator 诊断报告');
+  L.push('  '+now.toLocaleString());
+  L.push('═══════════════════════════════════════');
+
+  sec('系统信息');
+  rw('固件',to(data.system.firmware)); rw('内核',to(data.system.kernel));
+  rw('架构',to(data.system.arch)); rw('防火墙',to(data.system.firewall_type));
+  rw('LAN IP',to(data.system.lan_ip)+' / '+to(data.system.lan_mask));
+  rw('运行时间',to(data.system.uptime));
+
+  sec('进程状态');
+  rw('运行中',yn(data.process.running)); rw('PID',to(data.process.pid));
+  rw('内存(VSZ)',to(data.process.vsz_kb)+' KB'); rw('模式',to(data.process.mode_cmdline)+(data.process.mode_ok?'':' [INVALID]'));
+  rw('端口 5588',yn(data.process.port_listening)); rw('开机自启',yn(data.process.init_enabled));
+
+  sec('Init 脚本 (/etc/init.d/acc)');
+  rw('文件存在',yn(data.init_script.exists)); rw('Args 行',to(data.init_script.args_line));
+  rw('模式标志',to(data.init_script.mode_flag)+' → '+to(data.init_script.mode_name));
+  rw('短格式(-m)',yn(data.init_script.short_format)); rw('有 -p 端口',yn(data.init_script.has_port));
+
+  if (data.core_config) {
+    var cfg = data.core_config;
+    sec('运行时配置 (acc_core_conf.json)');
+    rw('文件存在',yn(cfg.exists));
+    if (cfg.exists) { rw('tproxy_ip',to(cfg.tproxy_ip)+' ['+ok(cfg.tproxy_ip_ok)+']'); rw('acc_mode',to(cfg.acc_mode_name)+' ['+ok(cfg.acc_mode_ok)+']'); }
+  }
+
+  sec('网络与防火墙');
+  rw('TUN 接口',to(data.network.tun_iface||'无')); rw('FW 5588',yn(data.network.fw_rule_5588));
+  rw('Hotplug',yn(data.network.hotplug)); rw('TURN 中继',ok(data.network.turn_reachable)+' (route-turn.xxghh.biz)');
+  rw('API 端点','HTTP '+to(data.network.api_http_code)+' ['+ok(data.network.api_reachable)+']');
+  rw('GAMEACC 链',yn(data.network.gameacc_exists));
+  if (data.network.gameacc_sample && data.network.gameacc_sample !== 'N/A') L.push('  '+pd('',COL)+' │ '+to(data.network.gameacc_sample));
+
+  // Latency
+  if (data.latency) {
+    sec('延迟诊断 (ping 5次, ms)');
+    L.push('  '+pd('目标',30)+'Min     Avg     Max     丢包');
+    L.push('  '+pd('─'.repeat(28),30)+'─────  ─────  ─────  ────');
+    var pRow = function(lb,r) {
+      var s = '  '+pd(lb,30);
+      s += pd(r.min||'?',7)+' '+pd(r.avg||'?',7)+' '+pd(r.max||'?',7)+(r.loss||'?')+'%';
+      return s;
+    };
+    if (data.latency.gateway) L.push(pRow('网关 ('+(data.latency.gateway.host||'')+')',data.latency.gateway));
+    if (data.latency.dns) L.push(pRow('DNS ('+(data.latency.dns.host||'')+')',data.latency.dns));
+    if (data.latency.turn) L.push(pRow('TURN 中继 ('+(data.latency.turn.host||'')+')',data.latency.turn));
+    if (data.latency.nodes && data.latency.nodes.length > 0) {
+      L.push(''); L.push('  加速节点 (雷神分配):');
+      L.push('  IP 地址              测速延迟');
+      L.push('  ──────────────────   ────────');
+      for (var i = 0; i < Math.min(data.latency.nodes.length,9); i++) {
+        var n = data.latency.nodes[i];
+        L.push('  '+pd(n.ip||'?',20)+(n.ping_ms||'?')+' ms');
+      }
+    }
+    var gwAvg = parseFloat((data.latency.gateway||{}).avg);
+    var turnAvg = parseFloat((data.latency.turn||{}).avg);
+    if (!isNaN(gwAvg) && gwAvg > 10) L.push('  ⚠ 网关延迟 >10ms → 检查 WiFi/LAN 干扰');
+    if (!isNaN(gwAvg) && !isNaN(turnAvg) && turnAvg-gwAvg > 50) L.push('  ⚠ TURN-网关 = '+(turnAvg-gwAvg).toFixed(0)+'ms → 宽带/服务器延迟');
+  }
+
+  sec('依赖包');
+  var pkgs = data.packages || {}, pKeys = Object.keys(pkgs).sort();
+  for (var ki = 0; ki < pKeys.length; ki++) rw(pKeys[ki],yn(pkgs[pKeys[ki]]));
+
+  sec('设备加速状态');
+  var devs = data.devices || { Phone:'None',PC:'None',Game:'None',Unknown:'None' };
+  for (var dn in devs) rw(dn,to(devs[dn]));
+
+  if (data.autopause) {
+    var ap = data.autopause;
+    sec('自动暂停');
+    rw('脚本',yn(ap.script_installed));
+    rw('手动令牌',ap.token_configured?to(ap.token_masked)+' [OK]':'未配置 ['+ok(false)+']');
+    rw('daemon 令牌',yn(ap.daemon_token_ok)+' (从 acc_core_conf.json 提取)');
+    rw('定时任务',yn(ap.cron_enabled));
+  }
+
+  sec('acc-gw 内部错误日志 (/tmp/acc/log/)');
+  var errLogs = data.error_logs || [];
+  if (errLogs.length > 0) for (var i = 0; i < errLogs.length; i++) L.push('  ['+errLogs[i].file+'] '+to(errLogs[i].line));
+  else L.push('  (无错误)');
+
+  sec('最近系统日志 (logread)');
+  var logs = data.logs || [];
+  if (logs.length > 0) for (var i = 0; i < logs.length; i++) L.push('  '+to(logs[i]));
+  else L.push('  (无相关日志)');
+
+  L.push(''); L.push('═══════════════════════════════════════'); L.push('  报告结束');
+  document.getElementById('debug_output').textContent = L.join('\n');
+}
+
+function debug_show_err(msg) {
+  document.getElementById('debug_status_text').innerHTML = '<span style="color:#c00">'+msg+'</span>';
+  document.getElementById('debug_output').textContent = 'ERROR: '+msg;
+}
+
+function debug_copy() {
+  var text = document.getElementById('debug_output').textContent;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function() {
+      var s = document.getElementById('debug_status_text'), old = s.innerHTML;
+      s.innerHTML = '<span style="color:#080">已复制到剪贴板</span>';
+      setTimeout(function(){s.innerHTML=old},2000);
+    });
+  } else {
+    var ta = document.createElement('textarea'); ta.value = text;
+    ta.style.position='fixed'; ta.style.left='-9999px';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  debug_refresh(); setInterval(debug_refresh, DEBUG_POLL_MS);
+});
+//]]></script>
