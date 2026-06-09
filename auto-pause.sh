@@ -32,6 +32,7 @@ load_config() {
     API_TIMEOUT=10
     API_ENDPOINT="https://webapi.leigod.com"
     NOTIFY_ON_PAUSE=1
+    MANUAL_DISABLE=0
 
     if [ -f "$CONFIG_FILE" ]; then
         . "$CONFIG_FILE"
@@ -39,6 +40,7 @@ load_config() {
     [ -z "$IDLE_CHECKS_BEFORE_PAUSE" ] && IDLE_CHECKS_BEFORE_PAUSE=3
     [ -z "$IDLE_CHECK_INTERVAL" ] && IDLE_CHECK_INTERVAL=2
     [ -z "$API_TIMEOUT" ] && API_TIMEOUT=10
+    [ -z "$MANUAL_DISABLE" ] && MANUAL_DISABLE=0
 }
 
 # --------------- token ---------------
@@ -116,6 +118,20 @@ STATEOF
 # --------------- main ---------------
 main() {
     load_config
+
+    # Manual disable: skip all idle detection and pause logic
+    if [ "$MANUAL_DISABLE" = "1" ]; then
+        read_state
+        IDLE_COUNT=0
+        if [ ! -f /tmp/leigod-away.logged ]; then
+            logger -t "$LOG_TAG" "离家模式已启用, 跳过本次自动暂停检测"
+            touch /tmp/leigod-away.logged
+        fi
+        write_state
+        return 0
+    fi
+    # Clean up away-mode marker when normal mode resumes
+    rm -f /tmp/leigod-away.logged
 
     local TOKEN
     TOKEN=$(get_token 2>/dev/null)

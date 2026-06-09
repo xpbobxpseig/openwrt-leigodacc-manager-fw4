@@ -11,6 +11,7 @@ local existing_idle = 3
 local existing_interval = 2
 local existing_timeout = 10
 local existing_notify = 1
+local existing_manual = 0
 if fs.access(AP_CONF) then
     for line in io.lines(AP_CONF) do
         local tv = line:match("^ACCOUNT_TOKEN='(.*)'$")
@@ -23,6 +24,8 @@ if fs.access(AP_CONF) then
         if tmo then existing_timeout = tonumber(tmo) end
         local nfy = line:match("^NOTIFY_ON_PAUSE=(%d+)")
         if nfy then existing_notify = tonumber(nfy) end
+        local man = line:match("^MANUAL_DISABLE=(%d+)")
+        if man then existing_manual = tonumber(man) end
     end
 end
 
@@ -78,6 +81,12 @@ notify.default = existing_notify
 notify.value = existing_notify
 notify.description = "暂停成功时打印通知到系统日志"
 
+-- Manual disable (away mode)
+manual = s:option(Flag, "_ap_manual", "离家模式 (禁止自动暂停)")
+manual.default = existing_manual
+manual.value = existing_manual
+manual.description = "离家时开启：禁止自动暂停时长计费。用于异地 PC 客户端加速场景，防止路由器误判无设备而暂停时长"
+
 -- Cron enable/disable
 cron_enable = s:option(Button, "_ap_toggle_cron")
 if fs.access("/etc/crontabs/root") then
@@ -114,6 +123,7 @@ m.on_commit = function(self)
     local idle_val = luci.http.formvalue("cbid.accelerator.system._ap_idle") or "3"
     local timeout_val = luci.http.formvalue("cbid.accelerator.system._ap_timeout") or "10"
     local notify_val = luci.http.formvalue("cbid.accelerator.system._ap_notify") or "1"
+    local manual_val = luci.http.formvalue("cbid.accelerator.system._ap_manual") or "0"
 
     local file = io.open(AP_CONF, "w")
     if not file then return end
@@ -139,6 +149,7 @@ m.on_commit = function(self)
     file:write(string.format("API_TIMEOUT=%d\n", tonumber(timeout_val) or 10))
     file:write(string.format("API_ENDPOINT=\"https://webapi.leigod.com\"\n"))
     file:write(string.format("NOTIFY_ON_PAUSE=%d\n", tonumber(notify_val) or 1))
+    file:write(string.format("MANUAL_DISABLE=%d\n", tonumber(manual_val) or 0))
     file:close()
 
     util.exec(string.format("chmod 600 %s", AP_CONF))

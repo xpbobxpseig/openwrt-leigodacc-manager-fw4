@@ -52,6 +52,64 @@ daemon 不写 UCI，状态在 `acc_core_conf.json` 中。改为从 JSON 实时�
 
 ---
 
+## v2.4.1 (2026-06-10) — 离家模式 Bug 修复 (8 项)
+
+### 严重修复：Debug 页面离家模式状态始终显示"自动模式"
+
+**现象：** LuCI Debug 页面和自动暂停状态页面的"离家模式"行始终显示"自动模式"，即使 `/etc/leigod-auto-pause.conf` 中 `MANUAL_DISABLE=1`。
+
+**根因：** `get_debug_status()` 中的 `break` 语句——当找到 `ACCOUNT_TOKEN` 行后立即退出 for 循环，而 `MANUAL_DISABLE` 行位于配置文件末尾，永远无法被解析到。
+
+**修复：** 移除 `break`，让循环完整遍历所有配置行。涉及 `leigod-fw4.sh` 内嵌 Lua（`luci-fw4-patch/luasrc/controller/acc.lua` 此前已正确）。
+
+### 修复：离家模式切换后过早自动暂停
+
+**现象：** 开启离家模式前设备已累积空闲计数（如 2/3），关闭离家模式后首次检测即触发暂停（本应等待 6 分钟）。
+
+**根因：** `main()` 在离家模式下直接 `return`，跳过 `read_state`/`write_state`。状态文件中的 `idle_count` 未被重置，存活到离家模式关闭之后。
+
+**修复：** 在离家模式分支中先 `read_state`，若 `IDLE_COUNT ≠ 0` 则重置为 0 并 `write_state`，确保退出离家模式后从零开始计数。
+
+### 修复：`save_token()` 默认配置缺少 `MANUAL_DISABLE`
+
+**现象：** 通过书签保存 token 到空白/新建配置文件时，生成的默认配置缺失 `MANUAL_DISABLE` 行。
+
+**修复：** `save_token()` 默认模板追加 `MANUAL_DISABLE=0`。涉及 `leigod-fw4.sh` 和 `luci-fw4-patch/luasrc/controller/acc.lua`。
+
+### 修复：`trigger_autopause()` 绕过离家模式守卫
+
+**现象：** LuCI "立即暂停"按钮直接调用 pause API，不检查离家模式状态。用户在离家模式下仍可手动暂停（与"禁止自动暂停"的设计意图冲突）。
+
+**修复：** `trigger_autopause()` 新增离家模式检查——`MANUAL_DISABLE=1` 时返回错误 `"离家模式已启用, 手动暂停被禁止"`。
+
+### 修复：离家模式日志泛滥
+
+**现象：** 离家模式下 cron 每 2 分钟运行一次，每次都写 `logger`（720 条/天），造成不必要的 syslog 膨胀。
+
+**修复：** 使用 `/tmp/leigod-away.logged` 标记文件——仅在首次进入离家模式时写日志，后续 cron 触发静默跳过。退出离家模式时自动清理标记。
+
+### 修复：Shell `cut -d= -f2` 解析脆弱性
+
+**现象：** `verify_luci()` 和 `auto_pause_status()` 使用 `grep | cut -d= -f2` 提取 `MANUAL_DISABLE` 值。若配置值意外含 `=`，解析结果错误。
+
+**修复：** 替换为 `sed 's/^MANUAL_DISABLE=//'`，精确削去前缀。
+
+### 修复：`get_debug_report()` token 覆盖
+
+**现象：** v2.4.0 中移除 `break` 后，若配置文件异常含多条 `ACCOUNT_TOKEN` 行，后续行会覆盖之前的解析结果（从 first-match 变为 last-match 语义）。
+
+**修复：** 添加 `and not token_ok` 守卫，保留首次匹配语义。
+
+### 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `leigod-fw4.sh` | `get_debug_status()` 移除 break；`main()` 离家模式重置 IDLE_COUNT + 日志节流；`save_token()` 默认模板追加 MANUAL_DISABLE；`trigger_autopause()` 新增离家模式检查；`verify_luci()`/`auto_pause_status()` 替换 cut→sed；`get_debug_report()` 添加 token 守卫 |
+| `auto-pause.sh` | `main()` 离家模式重置 IDLE_COUNT + 日志节流 |
+| `luci-fw4-patch/luasrc/controller/acc.lua` | `save_token()` 默认模板追加 MANUAL_DISABLE；`trigger_autopause()` 新增离家模式检查；`get_debug_report()` 添加 token 守卫 |
+
+---
+
 ## v2.3.3 (2026-05-31) — 延迟抖动根因修复 + 内核网络调优 + 重装配置保护
 
 ### 严重修复：reinstall_leigodacc() 配置丢失

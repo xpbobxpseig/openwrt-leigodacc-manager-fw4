@@ -2,6 +2,7 @@
 
 # ============================================================
 # OpenWrt LeigodAcc Manager - fw4/nftables adapted version
+# 版本: v2.4.1 (2026-06-10)
 # 项目: https://github.com/xxx/openwrt-leigodacc-manager-fw4
 # 基于: miaoermua/openwrt-leigodacc-manager
 # AI 辅助: DeepSeek AI 生成和修改
@@ -499,6 +500,8 @@ local function read_ap_conf()
       conf["API_TIMEOUT"] = line:match("=(%d+)")
     elseif line:match("^NOTIFY_ON_PAUSE=(%d+)") then
       conf["NOTIFY_ON_PAUSE"] = line:match("=(%d+)")
+    elseif line:match("^MANUAL_DISABLE=(%d+)") then
+      conf["MANUAL_DISABLE"] = line:match("=(%d+)")
     end
   end
   return conf
@@ -543,6 +546,7 @@ function get_autopause_status()
   -- Config values
   resp.idle_checks = conf["IDLE_CHECKS_BEFORE_PAUSE"] or "3"
   resp.api_timeout  = conf["API_TIMEOUT"] or "10"
+  resp.manual_disable = conf["MANUAL_DISABLE"] or "0"
 
   -- Cron status
   local cron_enabled = false
@@ -598,6 +602,7 @@ function save_autopause_config()
   local idle_checks = luci.http.formvalue("idle_checks")
   local api_timeout = luci.http.formvalue("api_timeout")
   local notify = luci.http.formvalue("notify_on_pause")
+  local manual_disable = luci.http.formvalue("manual_disable") or "0"
 
   local file = io.open(AP_CONF, "w")
   if not file then
@@ -620,6 +625,7 @@ function save_autopause_config()
   file:write(string.format("API_TIMEOUT=%d\n", tonumber(api_timeout) or 10))
   file:write(string.format("API_ENDPOINT=\"https://webapi.leigod.com\"\n"))
   file:write(string.format("NOTIFY_ON_PAUSE=%d\n", tonumber(notify) or 1))
+  file:write(string.format("MANUAL_DISABLE=%d\n", tonumber(manual_disable) or 0))
   file:close()
 
   util.exec(string.format("chmod 600 %s", AP_CONF))
@@ -638,8 +644,15 @@ function trigger_autopause()
     return
   end
 
-  local token = ""
+  -- Respect manual disable (away mode)
   local conf = read_ap_conf()
+  if conf["MANUAL_DISABLE"] == "1" then
+    luci.http.prepare_content("application/json")
+    luci.http.write_json({ result = "ERROR", message = "离家模式已启用, 手动暂停被禁止" })
+    return
+  end
+
+  local token = ""
   if conf["ACCOUNT_TOKEN"] then
     token = conf["ACCOUNT_TOKEN"]
   end
@@ -1016,7 +1029,8 @@ function get_debug_status()
     token_configured = false,
     token_masked     = "(not set)",
     daemon_token_ok  = false,
-    cron_enabled     = false
+    cron_enabled     = false,
+    manual_disable   = "0"
   }
   -- Check manual token
   if fs.access("/etc/leigod-auto-pause.conf") then
@@ -1029,8 +1043,10 @@ function get_debug_status()
         else
           resp.autopause.token_masked = string.rep("*", #val)
         end
-        break
+        -- no break: continue loop to parse MANUAL_DISABLE and other keys
       end
+      local md = line:match("^MANUAL_DISABLE=(%d+)")
+      if md then resp.autopause.manual_disable = md end
     end
   end
   -- Check daemon token (fallback source, always fresh via heartbeat)
@@ -1410,17 +1426,22 @@ function get_debug_report()
   w("  Script:      " .. yn(fs.access("/usr/sbin/leigod-auto-pause.sh")))
   local token_ok = false
   local token_masked = "(not set)"
+  local manual_disable = false
   if fs.access("/etc/leigod-auto-pause.conf") then
     for line in io.lines("/etc/leigod-auto-pause.conf") do
       local key, val = line:match("ACCOUNT_TOKEN='(.*)'")
-      if key and val and val ~= "" then
+      if key and val and val ~= "" and not token_ok then
         token_ok = true
         token_masked = #val > 12 and (val:sub(1,8) .. "..." .. val:sub(-4)) or string.rep("*",#val)
-        break
       end
+      local md = line:match("^MANUAL_DISABLE=(%d+)")
+      if md == "1" then manual_disable = true end
     end
   end
   w("  Token:       " .. token_masked .. " [" .. ok(token_ok) .. "]")
+  if manual_disable then
+    w("  AwayMode:    已启用 (自动暂停禁用)")
+  end
   local cron_ok = false
   if fs.access("/etc/crontabs/root") then
     for line in io.lines("/etc/crontabs/root") do
@@ -1536,7 +1557,7 @@ function save_token()
     file:write(string.format("ACCOUNT_TOKEN='%s'\n", token))
     -- Ensure default settings exist
     if not has_user then
-      file:write("IDLE_CHECKS_BEFORE_PAUSE=3\nAPI_TIMEOUT=10\nAPI_ENDPOINT=\"https://webapi.leigod.com\"\nNOTIFY_ON_PAUSE=1\n")
+      file:write("IDLE_CHECKS_BEFORE_PAUSE=3\nAPI_TIMEOUT=10\nAPI_ENDPOINT=\"https://webapi.leigod.com\"\nNOTIFY_ON_PAUSE=1\nMANUAL_DISABLE=0\n")
     end
   end
   file:close()
@@ -1703,6 +1724,7 @@ local existing_idle = 3
 local existing_interval = 2
 local existing_timeout = 10
 local existing_notify = 1
+local existing_manual = 0
 if fs.access(AP_CONF) then
     for line in io.lines(AP_CONF) do
         local tv = line:match("^ACCOUNT_TOKEN='(.*)'$")
@@ -1715,6 +1737,8 @@ if fs.access(AP_CONF) then
         if tmo then existing_timeout = tonumber(tmo) end
         local nfy = line:match("^NOTIFY_ON_PAUSE=(%d+)")
         if nfy then existing_notify = tonumber(nfy) end
+        local man = line:match("^MANUAL_DISABLE=(%d+)")
+        if man then existing_manual = tonumber(man) end
     end
 end
 
@@ -1770,6 +1794,12 @@ notify.default = existing_notify
 notify.value = existing_notify
 notify.description = "暂停成功时打印通知到系统日志"
 
+-- Manual disable (away mode)
+manual = s:option(Flag, "_ap_manual", "离家模式 (禁止自动暂停)")
+manual.default = existing_manual
+manual.value = existing_manual
+manual.description = "离家时开启：禁止自动暂停时长计费。用于异地 PC 客户端加速场景，防止路由器误判无设备而暂停时长"
+
 -- Cron enable/disable
 cron_enable = s:option(Button, "_ap_toggle_cron")
 if fs.access("/etc/crontabs/root") then
@@ -1806,6 +1836,7 @@ m.on_commit = function(self)
     local idle_val = luci.http.formvalue("cbid.accelerator.system._ap_idle") or "3"
     local timeout_val = luci.http.formvalue("cbid.accelerator.system._ap_timeout") or "10"
     local notify_val = luci.http.formvalue("cbid.accelerator.system._ap_notify") or "1"
+    local manual_val = luci.http.formvalue("cbid.accelerator.system._ap_manual") or "0"
 
     local file = io.open(AP_CONF, "w")
     if not file then return end
@@ -1831,6 +1862,7 @@ m.on_commit = function(self)
     file:write(string.format("API_TIMEOUT=%d\n", tonumber(timeout_val) or 10))
     file:write(string.format("API_ENDPOINT=\"https://webapi.leigod.com\"\n"))
     file:write(string.format("NOTIFY_ON_PAUSE=%d\n", tonumber(notify_val) or 1))
+    file:write(string.format("MANUAL_DISABLE=%d\n", tonumber(manual_val) or 0))
     file:close()
 
     util.exec(string.format("chmod 600 %s", AP_CONF))
@@ -1907,6 +1939,7 @@ LUAEOF
       var items = [
         ["脚本", data.script_installed ? "&#x2705; 已安装" : "&#x26A0; 未安装"],
         ["令牌", data.token_configured ? "&#x2705; " + data.token_masked : "&#x26A0; 未配置"],
+        ["离家模式", data.manual_disable == "1" ? "&#x1F3E0; 已启用 (自动暂停禁用)" : "自动模式"],
         ["定时任务", data.cron_enabled ? "&#x2705; 已启用 (每2分钟)" : "&#x26A0; 已禁用"],
         ["空闲计数", data.idle_count + " / " + data.idle_checks],
         ["上次暂停", data.last_pause_text],
@@ -2421,6 +2454,7 @@ function debug_render(data) {
     sec('自动暂停');
     rw('脚本',yn(ap.script_installed));
     rw('手动令牌',ap.token_configured?to(ap.token_masked)+' [OK]':'未配置 ['+ok(false)+']');
+    rw('离家模式',ap.manual_disable=='1'?'已启用 (自动暂停禁用)':'自动模式');
     rw('daemon 令牌',yn(ap.daemon_token_ok)+' (从 acc_core_conf.json 提取)');
     rw('定时任务',yn(ap.cron_enabled));
   }
@@ -3184,11 +3218,15 @@ verify_luci() {
     echo ""
     echo "[4/4] 自动暂停配置"
     if [ -f /etc/leigod-auto-pause.conf ]; then
-        if grep -q "ACCOUNT_TOKEN" /etc/leigod-auto-pause.conf 2>/dev/null; then
+        . /etc/leigod-auto-pause.conf
+        if [ -n "$ACCOUNT_TOKEN" ]; then
             echo "  [OK] /etc/leigod-auto-pause.conf (token 已配置)"
         else
             echo "  [WARN] /etc/leigod-auto-pause.conf (token 未配置)"
             echo "  → 通过 LuCI 自动暂停页面书签一键获取"
+        fi
+        if [ "$MANUAL_DISABLE" = "1" ]; then
+            echo "  [INFO] 离家模式已启用 (自动暂停暂时禁用)"
         fi
     else
         echo "  [INFO] /etc/leigod-auto-pause.conf 未配置 (首次安装正常)"
@@ -4566,10 +4604,12 @@ load_config() {
     API_TIMEOUT=10
     API_ENDPOINT="https://webapi.leigod.com"
     NOTIFY_ON_PAUSE=1
+    MANUAL_DISABLE=0
     if [ -f "$CONFIG_FILE" ]; then . "$CONFIG_FILE"; fi
     [ -z "$IDLE_CHECKS_BEFORE_PAUSE" ] && IDLE_CHECKS_BEFORE_PAUSE=3
     [ -z "$IDLE_CHECK_INTERVAL" ] && IDLE_CHECK_INTERVAL=2
     [ -z "$API_TIMEOUT" ] && API_TIMEOUT=10
+    [ -z "$MANUAL_DISABLE" ] && MANUAL_DISABLE=0
 }
 
 get_token() {
@@ -4623,6 +4663,20 @@ STATEOF
 
 main() {
     load_config
+
+    # Manual disable: skip all idle detection and pause logic
+    if [ "$MANUAL_DISABLE" = "1" ]; then
+        read_state
+        IDLE_COUNT=0
+        if [ ! -f /tmp/leigod-away.logged ]; then
+            logger -t "$LOG_TAG" "离家模式已启用, 跳过本次自动暂停检测"
+            touch /tmp/leigod-away.logged
+        fi
+        write_state
+        return 0
+    fi
+    # Clean up away-mode marker when normal mode resumes
+    rm -f /tmp/leigod-away.logged
     local TOKEN; TOKEN=$(get_token 2>/dev/null)
     if [ -z "$TOKEN" ]; then
         logger -t "$LOG_TAG" "account_token 未配置, 请通过 LuCI 自动暂停页面的书签获取"
@@ -4696,6 +4750,7 @@ IDLE_CHECKS_BEFORE_PAUSE=3
 API_TIMEOUT=10
 API_ENDPOINT="https://webapi.leigod.com"
 NOTIFY_ON_PAUSE=1
+MANUAL_DISABLE=0
 CONFOF
     chmod 600 "$AUTO_PAUSE_CONF"
     echo "[INFO] 配置已保存: $AUTO_PAUSE_CONF"
@@ -4739,11 +4794,17 @@ auto_pause_status() {
     echo
     if [ -f "$AUTO_PAUSE_CONF" ]; then
         echo "[配置] $AUTO_PAUSE_CONF: 已配置"
-        token=$(grep ACCOUNT_TOKEN "$AUTO_PAUSE_CONF" | cut -d"'" -f2)
-        if [ -n "$token" ]; then
+        . "$AUTO_PAUSE_CONF"
+        if [ -n "$ACCOUNT_TOKEN" ]; then
             local token_len
-            token_len=${#token}
-            echo "  token: ${token:0:8}...${token:$((token_len - 4))}"
+            token_len=${#ACCOUNT_TOKEN}
+            echo "  token: ${ACCOUNT_TOKEN:0:8}...${ACCOUNT_TOKEN:$((token_len - 4))}"
+        fi
+        # Show manual disable status
+        if [ "$MANUAL_DISABLE" = "1" ]; then
+            echo "[模式] 离家模式 (自动暂停已禁用)"
+        else
+            echo "[模式] 自动模式 (正常检测空闲)"
         fi
     else
         echo "[配置] 未配置"

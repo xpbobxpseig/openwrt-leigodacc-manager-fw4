@@ -139,6 +139,7 @@ function debug_render(data) {
     sec('自动暂停');
     rw('脚本',yn(ap.script_installed));
     rw('手动令牌',ap.token_configured?to(ap.token_masked)+' [OK]':'未配置 ['+ok(false)+']');
+    rw('离家模式',ap.manual_disable=='1'?'已启用 (自动暂停禁用)':'自动模式');
     rw('daemon 令牌',yn(ap.daemon_token_ok)+' (从 acc_core_conf.json 提取)');
     rw('定时任务',yn(ap.cron_enabled));
   }

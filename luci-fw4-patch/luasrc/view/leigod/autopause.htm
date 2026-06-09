@@ -55,6 +55,7 @@
       var items = [
         ["脚本", data.script_installed ? "&#x2705; 已安装" : "&#x26A0; 未安装"],
         ["令牌", data.token_configured ? "&#x2705; " + data.token_masked : "&#x26A0; 未配置"],
+        ["离家模式", data.manual_disable == "1" ? "&#x1F3E0; 已启用 (自动暂停禁用)" : "自动模式"],
         ["定时任务", data.cron_enabled ? "&#x2705; 已启用 (每2分钟)" : "&#x26A0; 已禁用"],
         ["空闲计数", data.idle_count + " / " + data.idle_checks],
         ["上次暂停", data.last_pause_text],
