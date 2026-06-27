@@ -256,6 +256,8 @@ function save_autopause_config()
   local token = luci.http.formvalue("account_token")
   if not token or token == "" or token:match("^%*+$") then
     token = conf["ACCOUNT_TOKEN"]  -- preserve existing
+  else
+    token = token:gsub("[^a-zA-Z0-9_-]", "")  -- sanitize (prevent config breakage)
   end
   local idle_checks = luci.http.formvalue("idle_checks") or conf["IDLE_CHECKS_BEFORE_PAUSE"] or "3"
   local api_timeout = luci.http.formvalue("api_timeout") or conf["API_TIMEOUT"] or "10"
@@ -329,10 +331,14 @@ function trigger_autopause()
   local code = resp_body:match('"code":%s*(%d+)')
 
   if code == "0" then
-    -- Record pause timestamp
+    -- Record pause timestamp via Lua I/O (echo '\n' is literal on BusyBox)
     local now = os.date("%s")
-    util.exec(string.format(
-      "echo 'idle_count=0\nlast_pause_epoch=%s' > %s", now, AP_STATE))
+    local sf = io.open(AP_STATE, "w")
+    if sf then
+      sf:write("idle_count=0\n")
+      sf:write("last_pause_epoch=" .. now .. "\n")
+      sf:close()
+    end
     luci.http.prepare_content("application/json")
     luci.http.write_json({ result = "OK", message = "Pause successful" })
   elseif code == "400803" then
@@ -630,9 +636,9 @@ function get_debug_status()
     for line in io.lines("/tmp/acc/acc_core_conf.json") do raw = raw .. line end
     -- Extract server host:port and ping values
     -- Pattern: "node":"s5://...@IP:PORT","ping":NN
-    for ip, ping_val in raw:gmatch('//[^@]+@([%d.]+):(%d+)"[^}]-"ping":(%d+)') do
+    for ip, port, ping_val in raw:gmatch('//[^@]+@([%d.]+):(%d+)"[^}]-"ping":(%d+)') do
       resp.latency.nodes[#resp.latency.nodes + 1] = {
-        ip = ip, port = ping_val, ping_ms = tonumber(ping_val) }
+        ip = ip, port = port, ping_ms = tonumber(ping_val) }
     end
     -- Try alternate pattern for node IP
     if #resp.latency.nodes == 0 then

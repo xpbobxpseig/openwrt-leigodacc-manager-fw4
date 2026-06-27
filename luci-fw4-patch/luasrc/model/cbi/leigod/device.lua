@@ -43,11 +43,13 @@ if fs.access("/tmp/dhcp.leases") then
     -- read time
     valueSl()
     -- read mac
-    local mac = valueSl()
+    local mac = valueSl() or ""
     -- get ip
-    local ip = valueSl()
+    local ip = valueSl() or ""
     -- get host name
-    local hostname = valueSl()
+    local hostname = valueSl() or ""
+    -- skip malformed entries
+    if mac == "" or mac:match("^%*") then goto continue end
     -- key
     local key = string.gsub(mac, ":", "")
     -- store key
@@ -57,6 +59,7 @@ if fs.access("/tmp/dhcp.leases") then
       ["ip"] = ip,
       ["name"] = hostname
     }
+    ::continue::
   end
 end
 
@@ -83,12 +86,13 @@ if fs.access("/proc/net/arp") then
     -- get flag
     local flag = valueSl()
     -- get mac
-    local mac = valueSl()
+    local mac = valueSl() or ""
     -- get mask
     valueSl()
     -- get device
-    local dev = valueSl()
+    local dev = valueSl() or ""
     -- get key
+    if mac == "" or mac:match("^%*") then goto continue_arp end
     local key = string.gsub(mac, ":", "")
     -- check if device and flag state
     if dev == ifc and flag == "0x2" then
@@ -105,6 +109,7 @@ if fs.access("/proc/net/arp") then
         ["name"] = name
       }
     end
+    ::continue_arp::
   end
 end
 

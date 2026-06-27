@@ -157,6 +157,7 @@ m.on_commit = function(self)
 
     -- Token
     if token_val ~= "" and not token_val:match("%*%*%*%*%*%*") then
+        token_val = token_val:gsub("[^a-zA-Z0-9_-]", "")  -- sanitize
         file:write(string.format("ACCOUNT_TOKEN='%s'\n", token_val))
     elseif existing_token ~= "" then
         file:write(string.format("ACCOUNT_TOKEN='%s'\n", existing_token))

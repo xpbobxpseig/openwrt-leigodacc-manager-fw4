@@ -2,8 +2,8 @@
 
 # ============================================================
 # OpenWrt LeigodAcc Manager - fw4/nftables adapted version
-# 版本: v2.5.0 (2026-06-27)
-# 变更: 离家模式 AJAX 直写 + stop_acc 自愈钩子 + 多轮 LuCI/CBI 修复
+# 版本: v2.5.1 (2026-06-27)
+# 变更: 代码审查修复 — gmatch 3→3变量 + 状态文件Lua IO + install read + 卸载取消 + JSON race guard + pgrep tighten + token sanitize + device.lua nil防护
 # 项目: https://github.com/xxx/openwrt-leigodacc-manager-fw4
 # 基于: miaoermua/openwrt-leigodacc-manager
 # AI 辅助: DeepSeek AI 生成和修改
@@ -607,6 +607,8 @@ function save_autopause_config()
   local token = luci.http.formvalue("account_token")
   if not token or token == "" or token:match("^%*+$") then
     token = conf["ACCOUNT_TOKEN"]  -- preserve existing
+  else
+    token = token:gsub("[^a-zA-Z0-9_-]", "")  -- sanitize (prevent config breakage)
   end
   local idle_checks = luci.http.formvalue("idle_checks") or conf["IDLE_CHECKS_BEFORE_PAUSE"] or "3"
   local api_timeout = luci.http.formvalue("api_timeout") or conf["API_TIMEOUT"] or "10"
@@ -680,10 +682,14 @@ function trigger_autopause()
   local code = resp_body:match('"code":%s*(%d+)')
 
   if code == "0" then
-    -- Record pause timestamp
+    -- Record pause timestamp via Lua I/O (echo '\n' is literal on BusyBox)
     local now = os.date("%s")
-    util.exec(string.format(
-      "echo 'idle_count=0\nlast_pause_epoch=%s' > %s", now, AP_STATE))
+    local sf = io.open(AP_STATE, "w")
+    if sf then
+      sf:write("idle_count=0\n")
+      sf:write("last_pause_epoch=" .. now .. "\n")
+      sf:close()
+    end
     luci.http.prepare_content("application/json")
     luci.http.write_json({ result = "OK", message = "Pause successful" })
   elseif code == "400803" then
@@ -981,9 +987,9 @@ function get_debug_status()
     for line in io.lines("/tmp/acc/acc_core_conf.json") do raw = raw .. line end
     -- Extract server host:port and ping values
     -- Pattern: "node":"s5://...@IP:PORT","ping":NN
-    for ip, ping_val in raw:gmatch('//[^@]+@([%d.]+):(%d+)"[^}]-"ping":(%d+)') do
+    for ip, port, ping_val in raw:gmatch('//[^@]+@([%d.]+):(%d+)"[^}]-"ping":(%d+)') do
       resp.latency.nodes[#resp.latency.nodes + 1] = {
-        ip = ip, port = ping_val, ping_ms = tonumber(ping_val) }
+        ip = ip, port = port, ping_ms = tonumber(ping_val) }
     end
     -- Try alternate pattern for node IP
     if #resp.latency.nodes == 0 then
@@ -1876,6 +1882,7 @@ m.on_commit = function(self)
 
     -- Token
     if token_val ~= "" and not token_val:match("%*%*%*%*%*%*") then
+        token_val = token_val:gsub("[^a-zA-Z0-9_-]", "")  -- sanitize
         file:write(string.format("ACCOUNT_TOKEN='%s'\n", token_val))
     elseif existing_token ~= "" then
         file:write(string.format("ACCOUNT_TOKEN='%s'\n", existing_token))
@@ -2124,11 +2131,13 @@ if fs.access("/tmp/dhcp.leases") then
     -- read time
     valueSl()
     -- read mac
-    local mac = valueSl()
+    local mac = valueSl() or ""
     -- get ip
-    local ip = valueSl()
+    local ip = valueSl() or ""
     -- get host name
-    local hostname = valueSl()
+    local hostname = valueSl() or ""
+    -- skip malformed entries
+    if mac == "" or mac:match("^%*") then goto continue end
     -- key
     local key = string.gsub(mac, ":", "")
     -- store key
@@ -2139,6 +2148,7 @@ if fs.access("/tmp/dhcp.leases") then
       ["name"] = hostname
     }
   end
+  ::continue::
 end
 
 ifc = uci:get("accelerator", "base", "neigh")
@@ -2164,12 +2174,13 @@ if fs.access("/proc/net/arp") then
     -- get flag
     local flag = valueSl()
     -- get mac
-    local mac = valueSl()
+    local mac = valueSl() or ""
     -- get mask
     valueSl()
     -- get device
-    local dev = valueSl()
+    local dev = valueSl() or ""
     -- get key
+    if mac == "" or mac:match("^%*") then goto continue_arp end
     local key = string.gsub(mac, ":", "")
     -- check if device and flag state
     if dev == ifc and flag == "0x2" then
@@ -2187,6 +2198,7 @@ if fs.access("/proc/net/arp") then
       }
     end
   end
+  ::continue_arp::
 end
 
 -- get device config
@@ -2587,7 +2599,8 @@ leigod_menu() {
 install_leigodacc() {
     if [ -d /usr/sbin/leigod ]; then
         echo -n "[INFO] 检测到已经安装 LeigodAcc ([1]继续安装 / [2]取消): "
-        case $choice in
+        read choice
+        case "$choice" in
             1)
                 ;;
             2)
@@ -2982,15 +2995,14 @@ uninstall_leigodacc() {
         return
     fi
 
-    echo "[INFO] 确定卸载? 输入数字后回车或 10s 后自动卸载 ([1]确定 / [2]取消): "
+    echo "[INFO] 确定卸载? 输入数字后回车或 10s 后自动取消 ([1]确定 / [2]取消): "
     read -t 10 choice
-    case $choice in
+    case "$choice" in
         1)
             ;;
-        2)
-            return
-            ;;
         *)
+            echo "[INFO] 取消卸载"
+            return
             ;;
     esac
 
@@ -3371,12 +3383,13 @@ fix_acc_core_conf() {
     # Self-healing: if daemon is stuck in a stop_acc crash loop (binary bug:
     # every ~50s web client disconnect triggers on_error → stop_acc),
     # force-restart the entire daemon to break the loop.
-    if pgrep -f "acc-gw" >/dev/null 2>&1; then
+    if pgrep -f "/usr/sbin/leigod/acc-gw" >/dev/null 2>&1; then
         local stops=$(tail -20 /tmp/acc/log/acc_daemon.log 2>/dev/null | grep -c 'stop_acc')
         if [ "$stops" -ge 2 ] 2>/dev/null; then
             echo "[WARN] 检测到 stop_acc 崩溃循环 (近20行含${stops}次stop), 强重启 daemon..."
             /etc/init.d/acc stop >/dev/null 2>&1
-            kill -9 $(pgrep -f "acc-gw") 2>/dev/null
+            pids=$(pgrep -f "/usr/sbin/leigod/acc-gw" 2>/dev/null)
+            [ -n "$pids" ] && kill -9 $pids 2>/dev/null
             sleep 2
             /etc/init.d/acc start >/dev/null 2>&1
             sleep 4
@@ -3420,7 +3433,12 @@ fix_acc_core_conf() {
     if [ "$current_mode" != "2" ]; then
         echo "[WARN] acc_core_conf.json acc_mode=$current_mode 不稳定 (已知稳定值为 2)"
         echo "[INFO] 正在修正 acc_mode 为 2 (TPROXY, 唯一稳定值)..."
-        sed -i "s|\"acc_mode\":$current_mode|\"acc_mode\":2|" "$conf"
+        # Guard against empty current_mode (JSON being written by daemon in race)
+        if [ -z "$current_mode" ]; then
+            sed -i 's|"acc_mode":[0-9]*|"acc_mode":2|' "$conf"
+        else
+            sed -i "s|\"acc_mode\":$current_mode|\"acc_mode\":2|" "$conf"
+        fi
         fixed=1
         echo "[INFO] acc_core_conf.json acc_mode 已修正为 2"
         # Note: "unknow acc mode:2" in daemon log is expected and non-fatal
@@ -3442,7 +3460,7 @@ fix_acc_core_conf() {
         # Only restart if acc-gw is NOT running (crashed state).
         # Restarting a running daemon flushes GAMEACC rules and triggers
         # the binary's hardcoded-fake-IP overwrite → crash loop.
-        if ! pgrep -f "acc-gw" >/dev/null 2>&1; then
+        if ! pgrep -f "/usr/sbin/leigod/acc-gw" >/dev/null 2>&1; then
             echo "[INFO] acc-gw 未运行, 启动服务..."
             /etc/init.d/acc start >/dev/null 2>&1
             sleep 4
@@ -4008,8 +4026,8 @@ check_service_status() {
     fi
 
     # acc-gw binary status
-    if pgrep -f "acc-gw" >/dev/null 2>&1; then
-        acc_pid=$(pgrep -f "acc-gw" | head -1)
+    if pgrep -f "/usr/sbin/leigod/acc-gw" >/dev/null 2>&1; then
+        acc_pid=$(pgrep -f "/usr/sbin/leigod/acc-gw" | head -1)
         echo "acc-gw 进程: 运行中 (PID: $acc_pid)"
         # Check if acc-gw is listening on the API port
         if ss -tlnp 2>/dev/null | grep -q ":5588.*acc-gw" || netstat -tlnp 2>/dev/null | grep -q ":5588.*acc-gw"; then
