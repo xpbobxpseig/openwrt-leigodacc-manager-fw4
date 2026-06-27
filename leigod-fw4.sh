@@ -2,7 +2,8 @@
 
 # ============================================================
 # OpenWrt LeigodAcc Manager - fw4/nftables adapted version
-# 版本: v2.4.1 (2026-06-10)
+# 版本: v2.5.0 (2026-06-27)
+# 变更: 离家模式 AJAX 直写 + stop_acc 自愈钩子 + 多轮 LuCI/CBI 修复
 # 项目: https://github.com/xxx/openwrt-leigodacc-manager-fw4
 # 基于: miaoermua/openwrt-leigodacc-manager
 # AI 辅助: DeepSeek AI 生成和修改
@@ -595,14 +596,25 @@ function get_autopause_status()
   luci.http.write_json(resp)
 end
 
--- save_autopause_config — form submit handler
+-- save_autopause_config — partial-update handler.
+-- Only fields explicitly passed in the request are updated;
+-- all others are preserved from the existing config file.
 function save_autopause_config()
   local util = require "luci.util"
+  local conf = read_ap_conf()
+
+  -- Read request values, fall back to existing config
   local token = luci.http.formvalue("account_token")
-  local idle_checks = luci.http.formvalue("idle_checks")
-  local api_timeout = luci.http.formvalue("api_timeout")
-  local notify = luci.http.formvalue("notify_on_pause")
-  local manual_disable = luci.http.formvalue("manual_disable") or "0"
+  if not token or token == "" or token:match("^%*+$") then
+    token = conf["ACCOUNT_TOKEN"]  -- preserve existing
+  end
+  local idle_checks = luci.http.formvalue("idle_checks") or conf["IDLE_CHECKS_BEFORE_PAUSE"] or "3"
+  local api_timeout = luci.http.formvalue("api_timeout") or conf["API_TIMEOUT"] or "10"
+  local notify = luci.http.formvalue("notify_on_pause") or conf["NOTIFY_ON_PAUSE"] or "1"
+  local manual_disable = luci.http.formvalue("manual_disable")
+  if manual_disable == nil or manual_disable == "" then
+    manual_disable = conf["MANUAL_DISABLE"] or "0"
+  end
 
   local file = io.open(AP_CONF, "w")
   if not file then
@@ -612,14 +624,8 @@ function save_autopause_config()
   end
 
   file:write("# LeigodAcc Auto-Pause configuration\n")
-  if token and token ~= "" and not token:match("^%*+$") then
+  if token and token ~= "" then
     file:write(string.format("ACCOUNT_TOKEN='%s'\n", token))
-  elseif token and token:match("^%*+$") then
-    -- Token unchanged (masked), preserve existing
-    local conf = read_ap_conf()
-    if conf["ACCOUNT_TOKEN"] then
-      file:write(string.format("ACCOUNT_TOKEN='%s'\n", conf["ACCOUNT_TOKEN"]))
-    end
   end
   file:write(string.format("IDLE_CHECKS_BEFORE_PAUSE=%d\n", tonumber(idle_checks) or 3))
   file:write(string.format("API_TIMEOUT=%d\n", tonumber(api_timeout) or 10))
@@ -1035,13 +1041,13 @@ function get_debug_status()
   -- Check manual token
   if fs.access("/etc/leigod-auto-pause.conf") then
     for line in io.lines("/etc/leigod-auto-pause.conf") do
-      local key, val = line:match("ACCOUNT_TOKEN='(.*)'")
-      if key and val and val ~= "" then
+      local token_val = line:match("ACCOUNT_TOKEN='(.*)'")
+      if token_val and token_val ~= "" then
         resp.autopause.token_configured = true
-        if #val > 12 then
-          resp.autopause.token_masked = val:sub(1, 8) .. "..." .. val:sub(-4)
+        if #token_val > 12 then
+          resp.autopause.token_masked = token_val:sub(1, 8) .. "..." .. token_val:sub(-4)
         else
-          resp.autopause.token_masked = string.rep("*", #val)
+          resp.autopause.token_masked = string.rep("*", #token_val)
         end
         -- no break: continue loop to parse MANUAL_DISABLE and other keys
       end
@@ -1429,10 +1435,10 @@ function get_debug_report()
   local manual_disable = false
   if fs.access("/etc/leigod-auto-pause.conf") then
     for line in io.lines("/etc/leigod-auto-pause.conf") do
-      local key, val = line:match("ACCOUNT_TOKEN='(.*)'")
-      if key and val and val ~= "" and not token_ok then
+      local token_val = line:match("ACCOUNT_TOKEN='(.*)'")
+      if token_val and token_val ~= "" and not token_ok then
         token_ok = true
-        token_masked = #val > 12 and (val:sub(1,8) .. "..." .. val:sub(-4)) or string.rep("*",#val)
+        token_masked = #token_val > 12 and (token_val:sub(1,8) .. "..." .. token_val:sub(-4)) or string.rep("*",#token_val)
       end
       local md = line:match("^MANUAL_DISABLE=(%d+)")
       if md == "1" then manual_disable = true end
@@ -1830,13 +1836,38 @@ s2 = m:section(SimpleSection, "运行状态")
 s2.template = "leigod/autopause"
 
 -- Form write handler
+-- Scan all submitted form values for a Flag option by name suffix.
+-- TypedSection uses internal CBI IDs (e.g. cfg0a1234), not the type name,
+-- so we can't hardcode the full form field name. Scan by suffix instead.
+-- luci.http.formvalues() (no args) returns {key = last_value, ...}, so
+-- for Flag (hidden=0 + checkbox=1), checked → value "1", unchecked → "0".
+local function find_flag(option_name, default)
+    for k, v in pairs(luci.http.formvalues()) do
+        if type(k) == "string" and k:match(option_name .. "$") then
+            return v == "1" and "1" or "0"
+        end
+    end
+    return default
+end
+
 m.on_commit = function(self)
     local token_val = luci.http.formvalue("cbid.accelerator.system._ap_token") or ""
     local interval_val = luci.http.formvalue("cbid.accelerator.system._ap_interval") or ""
     local idle_val = luci.http.formvalue("cbid.accelerator.system._ap_idle") or "3"
     local timeout_val = luci.http.formvalue("cbid.accelerator.system._ap_timeout") or "10"
-    local notify_val = luci.http.formvalue("cbid.accelerator.system._ap_notify") or "1"
-    local manual_val = luci.http.formvalue("cbid.accelerator.system._ap_manual") or "0"
+    local notify_val = find_flag("_ap_notify", "1")
+    -- manual_disable is a real UCI-backed Flag; CBI writes it to
+    -- /etc/config/accelerator before on_commit fires. Read the raw file
+    -- to avoid UCI cursor caching and form-field name mismatch.
+    local manual_val = "0"
+    local uf = io.open("/etc/config/accelerator")
+    if uf then
+        for line in uf:lines() do
+            local v = line:match("^%s*option manual_disable%s+'([01])'")
+            if v then manual_val = v; break end
+        end
+        uf:close()
+    end
 
     local file = io.open(AP_CONF, "w")
     if not file then return end
@@ -2028,6 +2059,15 @@ LUAEOF
       if (cron_btn) {
         cron_btn.type = "button";
         cron_btn.onclick = function(e) { e.preventDefault(); ap_toggle_cron(); };
+      }
+    });
+
+    // Away mode checkbox: event delegation (CBI renders checkboxes after DOMContentLoaded)
+    document.addEventListener('change', function(e) {
+      if (e.target.name && e.target.name.match('_ap_manual$')) {
+        XHR.get('<%=luci.dispatcher.build_url("admin", "services", "acc", "ap_save")%>?manual_disable=' + (e.target.checked ? '1' : '0'), null, function() {
+          ap_poll();
+        });
       }
     });
 
@@ -3328,6 +3368,23 @@ fix_acc_core_conf() {
     lan_ip=$(uci get network.lan.ipaddr 2>/dev/null)
     [ -z "$lan_ip" ] && return 0
 
+    # Self-healing: if daemon is stuck in a stop_acc crash loop (binary bug:
+    # every ~50s web client disconnect triggers on_error → stop_acc),
+    # force-restart the entire daemon to break the loop.
+    if pgrep -f "acc-gw" >/dev/null 2>&1; then
+        local stops=$(tail -20 /tmp/acc/log/acc_daemon.log 2>/dev/null | grep -c 'stop_acc')
+        if [ "$stops" -ge 2 ] 2>/dev/null; then
+            echo "[WARN] 检测到 stop_acc 崩溃循环 (近20行含${stops}次stop), 强重启 daemon..."
+            /etc/init.d/acc stop >/dev/null 2>&1
+            kill -9 $(pgrep -f "acc-gw") 2>/dev/null
+            sleep 2
+            /etc/init.d/acc start >/dev/null 2>&1
+            sleep 4
+            sed -i "s|\"tproxy_ip\":\"[^\"]*\"|\"tproxy_ip\":\"$lan_ip\"|" "$conf" 2>/dev/null
+            echo "[INFO] Daemon 已强重启, JSON 已修复"
+        fi
+    fi
+
     current_ip=$(sed -n 's/.*"tproxy_ip":"\([^"]*\)".*/\1/p' "$conf" 2>/dev/null)
     current_mode=$(sed -n 's/.*"acc_mode":\([0-9]*\).*/\1/p' "$conf" 2>/dev/null)
     local fixed=0
@@ -3382,29 +3439,31 @@ fix_acc_core_conf() {
 
     # === Restart if anything was fixed ===
     if [ "$fixed" = "1" ] && [ -x /etc/init.d/acc ]; then
-        echo "[INFO] 配置已修复, 重启 acc-gw 服务..."
-        /etc/init.d/acc stop >/dev/null 2>&1
-        sleep 2
-        # Kill any remaining processes
-        kill $(pgrep -f "acc-gw") 2>/dev/null
-        sleep 1
-        /etc/init.d/acc start >/dev/null 2>&1
-        sleep 4
+        # Only restart if acc-gw is NOT running (crashed state).
+        # Restarting a running daemon flushes GAMEACC rules and triggers
+        # the binary's hardcoded-fake-IP overwrite → crash loop.
+        if ! pgrep -f "acc-gw" >/dev/null 2>&1; then
+            echo "[INFO] acc-gw 未运行, 启动服务..."
+            /etc/init.d/acc start >/dev/null 2>&1
+            sleep 4
 
-        # Verify tproxy_ip survived the restart (binary may overwrite)
-        recheck_ip=$(sed -n 's/.*"tproxy_ip":"\([^"]*\)".*/\1/p' "$conf" 2>/dev/null)
-        if [ "$recheck_ip" != "$lan_ip" ]; then
-            echo "[WARN] tproxy_ip 在重启后又被覆盖为 '$recheck_ip'"
-            echo "[INFO] 二进制硬编码了假IP, 再次修复..."
-            sed -i "s|\"tproxy_ip\":\"[^\"]*\"|\"tproxy_ip\":\"$lan_ip\"|" "$conf"
-        fi
+            # Verify tproxy_ip survived the start (binary may overwrite)
+            recheck_ip=$(sed -n 's/.*"tproxy_ip":"\([^"]*\)".*/\1/p' "$conf" 2>/dev/null)
+            if [ "$recheck_ip" != "$lan_ip" ]; then
+                echo "[WARN] tproxy_ip 在启动后又被覆盖为 '$recheck_ip'"
+                echo "[INFO] 二进制硬编码了假IP, 再次修复..."
+                sed -i "s|\"tproxy_ip\":\"[^\"]*\"|\"tproxy_ip\":\"$lan_ip\"|" "$conf"
+            fi
 
-        # Verify port listening
-        sleep 2
-        if netstat -tlnp 2>/dev/null | grep -q 5588 || ss -tlnp 2>/dev/null | grep -q 5588; then
-            echo "[INFO] 端口 5588 已监听, 服务正常"
+            # Verify port listening
+            sleep 2
+            if netstat -tlnp 2>/dev/null | grep -q 5588 || ss -tlnp 2>/dev/null | grep -q 5588; then
+                echo "[INFO] 端口 5588 已监听, 服务正常"
+            else
+                echo "[ERR] 端口 5588 未监听! 请手动排查: /etc/init.d/acc restart"
+            fi
         else
-            echo "[ERR] 端口 5588 未监听! 请手动排查: /etc/init.d/acc restart"
+            echo "[INFO] acc-gw 运行中, JSON 配置已修复 (无需重启以免中断加速)"
         fi
     fi
 }
@@ -3413,12 +3472,19 @@ fix_acc_core_conf() {
 # Install tproxy_ip watcher cron job
 # The acc-gw binary hardcodes a fake tproxy_ip (10.20.30.40)
 # and regenerates acc_core_conf.json on each daemon restart,
-# overwriting manual fixes. This cron checks every 2 minutes
+# overwriting manual fixes. This cron checks every 5 minutes
 # and auto-repairs tproxy_ip + acc_mode.
 # ============================================================
 install_tproxy_watcher() {
-    local watcher_cron="*/2 * * * * /usr/sbin/leigod/leigod-fw4.sh fix-tproxy >/dev/null 2>&1"
+    local watcher_cron="*/5 * * * * /usr/sbin/leigod/leigod-fw4.sh fix-tproxy >/dev/null 2>&1"
     local cron_file="/etc/crontabs/root"
+
+    # Ensure self is deployed to the path referenced by the cron job
+    if [ ! -f /usr/sbin/leigod/leigod-fw4.sh ] && [ -f "$0" ]; then
+        cp "$0" /usr/sbin/leigod/leigod-fw4.sh
+        chmod +x /usr/sbin/leigod/leigod-fw4.sh
+        echo "[INFO] 已部署脚本到 /usr/sbin/leigod/leigod-fw4.sh"
+    fi
 
     # Skip if already installed
     if grep -q "leigod-fw4.sh fix-tproxy" "$cron_file" 2>/dev/null; then
@@ -3427,7 +3493,7 @@ install_tproxy_watcher() {
 
     echo "$watcher_cron" >> "$cron_file"
     /etc/init.d/cron restart 2>/dev/null
-    echo "[INFO] tproxy_ip 守护 cron 已安装 (每2分钟检查)"
+    echo "[INFO] tproxy_ip 守护 cron 已安装 (每5分钟检查)"
 }
 
 remove_tproxy_watcher() {
@@ -4563,23 +4629,9 @@ auto_pause_install() {
         return 1
     fi
 
-    # Deploy the auto-pause script
-    if [ -f "$AUTO_PAUSE_SCRIPT" ]; then
-        echo "[INFO] 脚本已部署: $AUTO_PAUSE_SCRIPT"
-    else
-        echo "[INFO] 正在部署脚本..."
-        local src=""
-        for path in /tmp/auto-pause.sh /tmp/upload/auto-pause.sh; do
-            [ -f "$path" ] && src="$path" && break
-        done
-        if [ -n "$src" ]; then
-            cp "$src" "$AUTO_PAUSE_SCRIPT"
-            chmod +x "$AUTO_PAUSE_SCRIPT"
-            echo "[INFO] 已部署到 $AUTO_PAUSE_SCRIPT (from $src)"
-        else
-            # Inline fallback — write bundled script directly
-            echo "[INFO] 使用内嵌脚本..."
-            cat > "$AUTO_PAUSE_SCRIPT" << 'AUTOSCRIPT'
+    # Deploy the latest embedded auto-pause script (always overwrite)
+    echo "[INFO] 正在部署脚本..."
+    cat > "$AUTO_PAUSE_SCRIPT" << 'AUTOSCRIPT'
 #!/bin/sh
 # ============================================================
 # LeigodAcc Auto-Pause — 自动暂停时长计费 (v2.5, inline)
@@ -4707,10 +4759,8 @@ main() {
 }
 main "$@"
 AUTOSCRIPT
-            chmod +x "$AUTO_PAUSE_SCRIPT"
-            echo "[INFO] 已部署内嵌脚本到 $AUTO_PAUSE_SCRIPT"
-        fi
-    fi
+    chmod +x "$AUTO_PAUSE_SCRIPT"
+    echo "[INFO] 已部署内嵌脚本到 $AUTO_PAUSE_SCRIPT"
 
     # Configure account_token (OPTIONAL — daemon token is auto-used as fallback)
     echo ""

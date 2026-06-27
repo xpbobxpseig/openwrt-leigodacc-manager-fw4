@@ -245,14 +245,25 @@ function get_autopause_status()
   luci.http.write_json(resp)
 end
 
--- save_autopause_config — form submit handler
+-- save_autopause_config — partial-update handler.
+-- Only fields explicitly passed in the request are updated;
+-- all others are preserved from the existing config file.
 function save_autopause_config()
   local util = require "luci.util"
+  local conf = read_ap_conf()
+
+  -- Read request values, fall back to existing config
   local token = luci.http.formvalue("account_token")
-  local idle_checks = luci.http.formvalue("idle_checks")
-  local api_timeout = luci.http.formvalue("api_timeout")
-  local notify = luci.http.formvalue("notify_on_pause")
-  local manual_disable = luci.http.formvalue("manual_disable") or "0"
+  if not token or token == "" or token:match("^%*+$") then
+    token = conf["ACCOUNT_TOKEN"]  -- preserve existing
+  end
+  local idle_checks = luci.http.formvalue("idle_checks") or conf["IDLE_CHECKS_BEFORE_PAUSE"] or "3"
+  local api_timeout = luci.http.formvalue("api_timeout") or conf["API_TIMEOUT"] or "10"
+  local notify = luci.http.formvalue("notify_on_pause") or conf["NOTIFY_ON_PAUSE"] or "1"
+  local manual_disable = luci.http.formvalue("manual_disable")
+  if manual_disable == nil or manual_disable == "" then
+    manual_disable = conf["MANUAL_DISABLE"] or "0"
+  end
 
   local file = io.open(AP_CONF, "w")
   if not file then
@@ -262,14 +273,8 @@ function save_autopause_config()
   end
 
   file:write("# LeigodAcc Auto-Pause configuration\n")
-  if token and token ~= "" and not token:match("^%*+$") then
+  if token and token ~= "" then
     file:write(string.format("ACCOUNT_TOKEN='%s'\n", token))
-  elseif token and token:match("^%*+$") then
-    -- Token unchanged (masked), preserve existing
-    local conf = read_ap_conf()
-    if conf["ACCOUNT_TOKEN"] then
-      file:write(string.format("ACCOUNT_TOKEN='%s'\n", conf["ACCOUNT_TOKEN"]))
-    end
   end
   file:write(string.format("IDLE_CHECKS_BEFORE_PAUSE=%d\n", tonumber(idle_checks) or 3))
   file:write(string.format("API_TIMEOUT=%d\n", tonumber(api_timeout) or 10))
@@ -685,13 +690,13 @@ function get_debug_status()
   -- Check manual token
   if fs.access("/etc/leigod-auto-pause.conf") then
     for line in io.lines("/etc/leigod-auto-pause.conf") do
-      local key, val = line:match("ACCOUNT_TOKEN='(.*)'")
-      if key and val and val ~= "" then
+      local token_val = line:match("ACCOUNT_TOKEN='(.*)'")
+      if token_val and token_val ~= "" then
         resp.autopause.token_configured = true
-        if #val > 12 then
-          resp.autopause.token_masked = val:sub(1, 8) .. "..." .. val:sub(-4)
+        if #token_val > 12 then
+          resp.autopause.token_masked = token_val:sub(1, 8) .. "..." .. token_val:sub(-4)
         else
-          resp.autopause.token_masked = string.rep("*", #val)
+          resp.autopause.token_masked = string.rep("*", #token_val)
         end
       end
       local md = line:match("^MANUAL_DISABLE=(%d+)")
@@ -1078,10 +1083,10 @@ function get_debug_report()
   local manual_disable = false
   if fs.access("/etc/leigod-auto-pause.conf") then
     for line in io.lines("/etc/leigod-auto-pause.conf") do
-      local key, val = line:match("ACCOUNT_TOKEN='(.*)'")
-      if key and val and val ~= "" and not token_ok then
+      local token_val = line:match("ACCOUNT_TOKEN='(.*)'")
+      if token_val and token_val ~= "" and not token_ok then
         token_ok = true
-        token_masked = #val > 12 and (val:sub(1,8) .. "..." .. val:sub(-4)) or string.rep("*",#val)
+        token_masked = #token_val > 12 and (token_val:sub(1,8) .. "..." .. token_val:sub(-4)) or string.rep("*",#token_val)
       end
       local md = line:match("^MANUAL_DISABLE=(%d+)")
       if md == "1" then manual_disable = true end

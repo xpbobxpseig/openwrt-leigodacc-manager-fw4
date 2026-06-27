@@ -117,13 +117,38 @@ s2 = m:section(SimpleSection, "运行状态")
 s2.template = "leigod/autopause"
 
 -- Form write handler
+-- Scan all submitted form values for a Flag option by name suffix.
+-- TypedSection uses internal CBI IDs (e.g. cfg0a1234), not the type name,
+-- so we can't hardcode the full form field name. Scan by suffix instead.
+-- luci.http.formvalues() (no args) returns {key = last_value, ...}, so
+-- for Flag (hidden=0 + checkbox=1), checked → value "1", unchecked → "0".
+local function find_flag(option_name, default)
+    for k, v in pairs(luci.http.formvalues()) do
+        if type(k) == "string" and k:match(option_name .. "$") then
+            return v == "1" and "1" or "0"
+        end
+    end
+    return default
+end
+
 m.on_commit = function(self)
     local token_val = luci.http.formvalue("cbid.accelerator.system._ap_token") or ""
     local interval_val = luci.http.formvalue("cbid.accelerator.system._ap_interval") or ""
     local idle_val = luci.http.formvalue("cbid.accelerator.system._ap_idle") or "3"
     local timeout_val = luci.http.formvalue("cbid.accelerator.system._ap_timeout") or "10"
-    local notify_val = luci.http.formvalue("cbid.accelerator.system._ap_notify") or "1"
-    local manual_val = luci.http.formvalue("cbid.accelerator.system._ap_manual") or "0"
+    local notify_val = find_flag("_ap_notify", "1")
+    -- manual_disable is a real UCI-backed Flag; CBI writes it to
+    -- /etc/config/accelerator before on_commit fires. Read the raw file
+    -- to avoid UCI cursor caching and form-field name mismatch.
+    local manual_val = "0"
+    local uf = io.open("/etc/config/accelerator")
+    if uf then
+        for line in uf:lines() do
+            local v = line:match("^%s*option manual_disable%s+'([01])'")
+            if v then manual_val = v; break end
+        end
+        uf:close()
+    end
 
     local file = io.open(AP_CONF, "w")
     if not file then return end

@@ -147,6 +147,15 @@
       }
     });
 
+    // Away mode checkbox: event delegation (CBI renders checkboxes after DOMContentLoaded)
+    document.addEventListener('change', function(e) {
+      if (e.target.name && e.target.name.match('_ap_manual$')) {
+        XHR.get('<%=luci.dispatcher.build_url("admin", "services", "acc", "ap_save")%>?manual_disable=' + (e.target.checked ? '1' : '0'), null, function() {
+          ap_poll();
+        });
+      }
+    });
+
     ap_poll();
     setInterval(ap_poll, 10000);
 //]]></script>
