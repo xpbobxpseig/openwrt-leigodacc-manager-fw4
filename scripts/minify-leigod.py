@@ -32,9 +32,10 @@ def minify(src_lines):
     return out
 
 def main():
-    src = sys.stdin.read().splitlines()
+    src = sys.stdin.buffer.read().decode('utf-8').splitlines()
     out = minify(src)
-    sys.stdout.write('\n'.join(out) + '\n')
+    # binary write: 避免 Windows 文本模式 \n -> \r\n
+    sys.stdout.buffer.write(('\n'.join(out) + '\n').encode('utf-8'))
 
 if __name__ == '__main__':
     main()
