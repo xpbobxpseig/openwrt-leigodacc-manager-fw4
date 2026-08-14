@@ -2,6 +2,26 @@
 
 基于 [openwrt-leigodacc-manager](https://github.com/miaoermua/openwrt-leigodacc-manager) 修改，适配 OpenWrt 24.10+ fw4/nftables 防火墙。
 
+## v2.5.2 (2026-08-15) — LuCI 兼容性修复 + 部署修复
+
+### 设备管理页 Runtime error 修复
+
+`/usr/lib/lua/luci/model/cbi/leigod/device.lua` 使用了 Lua 5.2+ 的 `goto`/`continue` 语法，LuCI 运行环境为 Lua 5.1，导致整页编译失败：
+
+```
+/usr/lib/lua/luci/model/cbi/leigod/device.lua:52: '=' expected near 'continue'
+```
+
+- `goto continue` / `goto continue_arp` 改写为 Lua 5.1 兼容的 `if not (...)` 嵌套（2 处）
+- `leigod-fw4.sh` 内嵌 heredoc 与 `luci-fw4-patch/` 独立副本同步修复
+- 块配平校验通过（if 链 13 + do 4 + function 1 = end 18）
+
+### 部署失败修复（CRLF 行尾）
+
+Windows 检出文件为 CRLF 行尾时，shebang 变为 `#!/bin/sh\r`，内核找不到解释器，报 `not found`：
+
+- 新增 `.gitattributes`（`*.sh text eol=lf`），强制 sh 脚本 LF 行尾，防止 git 检出再转 CRLF
+
 ## v2.4.0 (2026-05-31) — 单文件部署 + 诊断增强 + 自动暂停内嵌
 
 ### leigod-fw4.sh 完全自包含

@@ -2,8 +2,8 @@
 
 # ============================================================
 # OpenWrt LeigodAcc Manager - fw4/nftables adapted version
-# 版本: v2.5.1 (2026-06-27)
-# 变更: 代码审查修复 — gmatch 3→3变量 + 状态文件Lua IO + install read + 卸载取消 + JSON race guard + pgrep tighten + token sanitize + device.lua nil防护
+# 版本: v2.5.2 (2026-08-15)
+# 变更: device.lua Lua5.1兼容修复(goto→if嵌套, 修设备页Runtime error) + .gitattributes LF行尾(防CRLF致shebang失效)
 # 项目: https://github.com/xxx/openwrt-leigodacc-manager-fw4
 # 基于: miaoermua/openwrt-leigodacc-manager
 # AI 辅助: DeepSeek AI 生成和修改
@@ -2137,18 +2137,18 @@ if fs.access("/tmp/dhcp.leases") then
     -- get host name
     local hostname = valueSl() or ""
     -- skip malformed entries
-    if mac == "" or mac:match("^%*") then goto continue end
-    -- key
-    local key = string.gsub(mac, ":", "")
-    -- store key
-    dhcp_map[key] = {
-      ["key"] = key,
-      ["mac"] = mac,
-      ["ip"] = ip,
-      ["name"] = hostname
-    }
+    if not (mac == "" or mac:match("^%*")) then
+      -- key
+      local key = string.gsub(mac, ":", "")
+      -- store key
+      dhcp_map[key] = {
+        ["key"] = key,
+        ["mac"] = mac,
+        ["ip"] = ip,
+        ["name"] = hostname
+      }
+    end
   end
-  ::continue::
 end
 
 ifc = uci:get("accelerator", "base", "neigh")
@@ -2180,25 +2180,25 @@ if fs.access("/proc/net/arp") then
     -- get device
     local dev = valueSl() or ""
     -- get key
-    if mac == "" or mac:match("^%*") then goto continue_arp end
-    local key = string.gsub(mac, ":", "")
-    -- check if device and flag state
-    if dev == ifc and flag == "0x2" then
-      -- get current name
-      local name = mac
-      if dhcp_map[key] ~= nil then
-        name = dhcp_map[key].name or mac
-        if name == "*" then name = mac end
+    if not (mac == "" or mac:match("^%*")) then
+      local key = string.gsub(mac, ":", "")
+      -- check if device and flag state
+      if dev == ifc and flag == "0x2" then
+        -- get current name
+        local name = mac
+        if dhcp_map[key] ~= nil then
+          name = dhcp_map[key].name or mac
+          if name == "*" then name = mac end
+        end
+        arp_map[key] = {
+          ["key"] = key,
+          ["mac"] = mac,
+          ["ip"] = ip,
+          ["name"] = name
+        }
       end
-      arp_map[key] = {
-        ["key"] = key,
-        ["mac"] = mac,
-        ["ip"] = ip,
-        ["name"] = name
-      }
     end
   end
-  ::continue_arp::
 end
 
 -- get device config

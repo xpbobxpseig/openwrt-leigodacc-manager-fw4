@@ -49,17 +49,17 @@ if fs.access("/tmp/dhcp.leases") then
     -- get host name
     local hostname = valueSl() or ""
     -- skip malformed entries
-    if mac == "" or mac:match("^%*") then goto continue end
-    -- key
-    local key = string.gsub(mac, ":", "")
-    -- store key
-    dhcp_map[key] = {
-      ["key"] = key,
-      ["mac"] = mac,
-      ["ip"] = ip,
-      ["name"] = hostname
-    }
-    ::continue::
+    if not (mac == "" or mac:match("^%*")) then
+      -- key
+      local key = string.gsub(mac, ":", "")
+      -- store key
+      dhcp_map[key] = {
+        ["key"] = key,
+        ["mac"] = mac,
+        ["ip"] = ip,
+        ["name"] = hostname
+      }
+    end
   end
 end
 
@@ -92,24 +92,24 @@ if fs.access("/proc/net/arp") then
     -- get device
     local dev = valueSl() or ""
     -- get key
-    if mac == "" or mac:match("^%*") then goto continue_arp end
-    local key = string.gsub(mac, ":", "")
-    -- check if device and flag state
-    if dev == ifc and flag == "0x2" then
-      -- get current name
-      local name = mac
-      if dhcp_map[key] ~= nil then
-        name = dhcp_map[key].name or mac
-        if name == "*" then name = mac end
+    if not (mac == "" or mac:match("^%*")) then
+      local key = string.gsub(mac, ":", "")
+      -- check if device and flag state
+      if dev == ifc and flag == "0x2" then
+        -- get current name
+        local name = mac
+        if dhcp_map[key] ~= nil then
+          name = dhcp_map[key].name or mac
+          if name == "*" then name = mac end
+        end
+        arp_map[key] = {
+          ["key"] = key,
+          ["mac"] = mac,
+          ["ip"] = ip,
+          ["name"] = name
+        }
       end
-      arp_map[key] = {
-        ["key"] = key,
-        ["mac"] = mac,
-        ["ip"] = ip,
-        ["name"] = name
-      }
     end
-    ::continue_arp::
   end
 end
 
