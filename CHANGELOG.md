@@ -22,6 +22,12 @@ Windows 检出文件为 CRLF 行尾时，shebang 变为 `#!/bin/sh\r`，内核�
 
 - 新增 `.gitattributes`（`*.sh text eol=lf`），强制 sh 脚本 LF 行尾，防止 git 检出再转 CRLF
 
+### Release 产物：压缩版
+
+- 新增 `leigod-fw4.min.sh`（heredoc 感知压缩：删注释行/空行，保留 shebang 与全部内嵌文件内容，209KB → 193KB）
+- 压缩器 `scripts/minify-leigod.py` 可复现产物
+- 等价性已验证：heredoc 内容逐字节一致、代码行零丢失、运行时输出一致
+
 ## v2.4.0 (2026-05-31) — 单文件部署 + 诊断增强 + 自动暂停内嵌
 
 ### leigod-fw4.sh 完全自包含
